@@ -1,0 +1,68 @@
+name: Windows test
+
+# Manual only. Nothing runs on push or on a schedule.
+on:
+  workflow_dispatch:
+    inputs:
+      commit_screenshots:
+        description: 'Commit the generated screenshots to docs/screenshots'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Safety tests on real Windows (throwaway files only)
+        shell: powershell
+        run: |
+          $PSVersionTable.PSVersion
+          powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\tests\Test-FolderClear.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Render the real window from a throwaway demo folder
+        shell: powershell
+        run: |
+          $demo = 'C:\FC-Demo\Old downloads'
+          New-Item -ItemType Directory -Path "$demo\Keep this subfolder" -Force | Out-Null
+          $rand = New-Object System.Random 7
+          $files = @{
+            'Quarterly-report-draft.docx' = 184320; 'holiday-photos-backup.zip' = 5242880
+            'invoice-march.pdf' = 96256; 'setup-old-version.exe' = 2621440
+            'meeting-notes.txt' = 2048; 'budget-2024.xlsx' = 40960
+            'screenshot-001.png' = 312000; 'screenshot-002.png' = 287000
+            'wallpaper.jpg' = 1048576; 'resume-v3.pdf' = 71680
+          }
+          foreach ($name in $files.Keys) {
+            $bytes = New-Object byte[] $files[$name]; $rand.NextBytes($bytes)
+            [System.IO.File]::WriteAllBytes("$demo\$name", $bytes)
+          }
+          Set-Content -LiteralPath "$demo\Keep this subfolder\notes.txt" -Value 'stays'
+          Set-Content -LiteralPath "$demo\hidden-settings.ini" -Value 'hidden'
+          (Get-Item -LiteralPath "$demo\hidden-settings.ini" -Force).Attributes = 'Hidden'
+          powershell -NoProfile -STA -ExecutionPolicy Bypass -File .\FolderClear.ps1 -Screenshot -DemoFolder $demo -ScreenshotDir .\docs\screenshots
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem .\docs\screenshots | Format-Table Name, Length
+          "Demo folder after the run:"
+          Get-ChildItem -LiteralPath $demo -Force | Format-Table Name, Mode
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: docs/screenshots
+
+      - name: Commit screenshots
+        if: ${{ inputs.commit_screenshots }}
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/screenshots
+          git commit -m "Add screenshots rendered from the real window"
+          git push
