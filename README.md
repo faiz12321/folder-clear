@@ -2,7 +2,7 @@
 
 **Clear a folder. Put files back when needed.**
 
-A small Windows app. You pick a folder, it shows you exactly which files are in it, and after you confirm it moves those files out of the folder into a holding folder. **Nothing is deleted**, and a button puts the files back.
+A small Windows app. You pick a folder, it shows you exactly which files are in it, and after you confirm it moves those files out of the folder into a holding folder. For ordinary local folders, **Folder Clear deletes nothing**, and a button puts the files back. Cloud-synced folders are not supported (see "Local folders only" below).
 
 ![Preview of the files that will be moved](docs/screenshots/2-preview.png)
 
@@ -22,6 +22,14 @@ Requirements: Windows 10 or 11 with the built-in Windows PowerShell 5.1. Nothing
 ## Important: this does not free disk space
 
 The files are moved, not deleted, so the folder is cleared but the space on your drive is still used. When you are sure you do not need the held files, delete them yourself in File Explorer (they are in the holding folder, see below). The app never deletes anything. There is no delete code in it at all.
+
+## Local folders only
+
+Folder Clear is for ordinary folders on your own drive. It refuses folders that look like they are synced by OneDrive, Dropbox, Google Drive, iCloud Drive, Box or pCloud. Moving a file out of a synced folder can look to the sync app like a deletion, which can remove the online copy, disturb syncing on your other devices or affect how long the service keeps it.
+
+This check is a best guess from folder names and Windows cloud-file markers. It cannot recognise every sync app, so do not point Folder Clear at a synced folder even if it lets you.
+
+It was tried only on a Windows Server test machine with pretend synced folders and Windows' own cloud-file mechanism. It has not been tried on a Windows 10 or 11 desktop, or against a real OneDrive, Dropbox, Google Drive or iCloud account.
 
 ## Where the files go
 
@@ -46,7 +54,7 @@ Put files back:
 
 - **Put back last move (N files)** returns the files of the most recent move to the folder they came from. Press it again for earlier moves.
 - A file is never overwritten. If a file with the same name is already in the original folder, that file stays in the holding folder and the app tells you.
-- If the original folder is gone or no longer allowed, nothing moves and the files stay safe in the holding folder.
+- If the original folder is gone or no longer allowed, nothing moves and the files stay safe in the holding folder. The confirmation box names the exact folder the files will go back to, and the app refuses to put them anywhere else, for example if the `manifest.json` was edited after you saw the box. That check guards against a change after you looked; it does not protect against someone or a program that can already edit your files as you.
 
 If something goes wrong half way (the app closes, the PC stops), the files already moved are in the batch folder and `manifest.json` lists all of them, so you can always find them or use **Put back last move**.
 
@@ -67,7 +75,7 @@ Files are moved with the Windows `MoveFileEx` call with no flags, so it cannot o
 
 ## Testing, and what has not been tested
 
-The safety tests and the screenshots run in GitHub Actions on a real Windows machine (`windows-latest`, which is Windows Server) using only throwaway files the test creates. They check that the refused folders are refused, that links, junctions, hidden files, system files and subfolders are left alone, that moved files arrive byte for byte in the holding folder with a correct manifest, that putting back works and never overwrites, that a locked file, a name clash, a holding folder that cannot be created, a holding folder behind a junction and a move to another drive all fail safely without losing or copying anything, and that the app source contains no delete code. The workflow runs only when you start it by hand.
+The safety tests and the screenshots run in GitHub Actions on a real Windows machine (`windows-latest`, which is Windows Server) using only throwaway files the test creates. They check that the refused folders and synced-style folders are refused, that links, junctions, hidden files, system files and subfolders are left alone, that moved files arrive byte for byte in the holding folder with a correct manifest, that putting back works and never overwrites, that a locked file, a name clash, a holding folder that cannot be created, a holding folder behind a junction and a move to another drive all fail safely without losing or copying anything, and that the app source contains no delete code. The workflow runs only when you start it by hand.
 
 It has not been run on a Windows 10 or 11 desktop by the author. The Browse dialog, the confirmation boxes and the Open holding folder button are the parts the automated run does not click through. Try it first on a folder of copies.
 
