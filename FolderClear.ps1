@@ -16,7 +16,7 @@ param(
     [switch]$NoUI,
     [switch]$Screenshot,
     [string]$DemoFolder,
-    [string]$ScreenshotDir = (Join-Path $PSScriptRoot 'docs\screenshots')
+    [string]$ScreenshotDir
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,6 +55,31 @@ function Get-ProtectedPaths {
     )
     $clean = { param($list) @($list | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') } | Select-Object -Unique) }
     return [pscustomobject]@{ Trees = (& $clean $trees); Exact = (& $clean $exact) }
+}
+
+# Heuristic only: looks for OneDrive, Dropbox, Google Drive, iCloud Drive, Box and pCloud sync folders by their
+# known locations and names, and for files marked as cloud files by Windows. It cannot see every sync app.
+function Test-LooksCloudSynced {
+    param([string]$Path)
+    $roots = @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial)
+    try { $roots += @(Get-ItemProperty -Path 'HKCU:\Software\Microsoft\OneDrive\Accounts\*' -ErrorAction SilentlyContinue | ForEach-Object { $_.UserFolder }) } catch { }
+    foreach ($r in @($roots | Where-Object { $_ } | ForEach-Object { ([string]$_).TrimEnd('\') })) {
+        if ([string]::Equals($Path, $r, 'OrdinalIgnoreCase') -or $Path.StartsWith($r + '\', 'OrdinalIgnoreCase')) { return $true }
+    }
+    foreach ($seg in ($Path -split '\\')) {
+        if ($seg -match '^(OneDrive|Dropbox|Google ?Drive|iCloud ?Drive|iCloudDrive|Box Sync|pCloud)(\b.*)?$') { return $true }
+    }
+    return $false
+}
+
+function Test-FolderHasCloudFiles {
+    param([string]$Path)
+    # Windows cloud-file flags: recall on open (0x40000), recall on data access (0x400000), pinned (0x80000), unpinned (0x100000), offline (0x1000).
+    $mask = 0x1000 -bor 0x40000 -bor 0x80000 -bor 0x100000 -bor 0x400000
+    foreach ($e in (Get-ChildItem -LiteralPath $Path -Force -File -ErrorAction SilentlyContinue)) {
+        if (([int]$e.Attributes -band $mask) -ne 0) { return $true }
+    }
+    return $false
 }
 
 function Test-TargetFolder {
@@ -101,6 +126,12 @@ function Test-TargetFolder {
         if ([string]::Equals($full, $t, 'OrdinalIgnoreCase') -or $t.StartsWith($full + '\', 'OrdinalIgnoreCase')) {
             $r.Reason = 'This is a personal root folder. Pick a folder inside it instead.'; return $r
         }
+    }
+    if (Test-LooksCloudSynced $full) {
+        $r.Reason = 'This folder looks cloud-synced (OneDrive, Dropbox, Google Drive or iCloud). Moving files out of a synced folder can remove them from the online copy or disturb syncing, so Folder Clear only works on ordinary local folders.'; return $r
+    }
+    if (Test-FolderHasCloudFiles $full) {
+        $r.Reason = 'This folder contains cloud-synced files. Moving them can delete them from the cloud, so Folder Clear only works on local folders.'; return $r
     }
     $r.Ok = $true
     $r.Path = $full
@@ -268,7 +299,9 @@ function Get-HeldBatches {
             if (Test-IsLink $d) { continue }
             if (-not (Test-Path -LiteralPath (Join-Path $d.FullName 'manifest.json'))) { continue }
             $n = @(Get-ChildItem -LiteralPath $d.FullName -File -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'manifest.json' -and $_.Name -ne 'READ ME.txt' }).Count
-            if ($n -gt 0) { $out += [pscustomobject]@{ Dir = $d.FullName; Count = $n } }
+            $srcName = ''
+            try { $srcName = [string]((Get-Content -LiteralPath (Join-Path $d.FullName 'manifest.json') -Raw -ErrorAction Stop | ConvertFrom-Json).SourceFolder) } catch { }
+            if ($n -gt 0) { $out += [pscustomobject]@{ Dir = $d.FullName; Count = $n; Source = $srcName } }
         }
     } catch { }
     return $out
@@ -277,7 +310,7 @@ function Get-HeldBatches {
 # Puts the files of one batch back into the folder they came from. A name that is already taken there is
 # never overwritten: that file simply stays in the holding folder.
 function Restore-Batch {
-    param([string]$BatchDir, [string]$HoldingRoot, [scriptblock]$OnProgress)
+    param([string]$BatchDir, [string]$HoldingRoot, [scriptblock]$OnProgress, [string]$ExpectedSource)
     $res = [pscustomobject]@{ Restored = 0; Left = (New-Object System.Collections.ArrayList); Error = ''; Source = '' }
     try {
         $root = [System.IO.Path]::GetFullPath($HoldingRoot).TrimEnd('\')
@@ -285,6 +318,9 @@ function Restore-Batch {
         if (-not $dirFull.StartsWith($root + '\', 'OrdinalIgnoreCase')) { $res.Error = 'That batch is not inside the holding folder.'; return $res }
         if (-not (Test-PathHasNoLink $dirFull)) { $res.Error = 'The holding folder is reached through a link.'; return $res }
         $mf = Get-Content -LiteralPath (Join-Path $dirFull 'manifest.json') -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($ExpectedSource -and -not [string]::Equals(([string]$mf.SourceFolder).TrimEnd('\'), $ExpectedSource.TrimEnd('\'), 'OrdinalIgnoreCase')) {
+            $res.Error = "The folder this batch goes back to changed after you were asked. Nothing was moved. The files are still safe in: $dirFull"; return $res
+        }
         $src = Test-TargetFolder -Path ([string]$mf.SourceFolder)
         if (-not $src.Ok) { $res.Error = "The original folder cannot be used any more ($($src.Reason)) The files are still safe in: $dirFull"; return $res }
         if ($src.Path.Substring(0, 1) -ine $dirFull.Substring(0, 1)) { $res.Error = 'The original folder is on a different drive.'; return $res }
@@ -444,7 +480,7 @@ $xaml = @'
       <StackPanel Grid.Row="4" Margin="2,12,2,12">
         <TextBlock x:Name="BinInfo" FontSize="12.5" FontWeight="SemiBold" Foreground="#5EEAD4" TextWrapping="Wrap" Margin="0,0,0,4"/>
         <TextBlock FontSize="12.5" Foreground="#9FB0CE" TextWrapping="Wrap"
-                   Text="Nothing is deleted and no disk space is freed. Only files directly inside this folder are moved, into the holding folder on the same drive. Subfolders, hidden, system and linked files stay. Press Put back last move to return them. You delete the held files yourself when you are sure."/>
+                   Text="For ordinary folders on your own drive, Folder Clear deletes nothing and frees no disk space. Only files directly inside the folder are moved, into the holding folder on the same drive. Subfolders, hidden, system and linked files stay. Press Put back last move to return them. You delete the held files yourself when you are sure. Folders synced by OneDrive, Dropbox, Google Drive or iCloud are not supported: moving files out of them can remove them from the cloud."/>
       </StackPanel>
 
       <Grid Grid.Row="5">
@@ -555,10 +591,10 @@ function Start-Restore {
     if ($batches.Count -eq 0) { Update-RestoreButton $null; return }
     $b = $batches[0]
     if (-not $SkipConfirm) {
-        $answer = [System.Windows.MessageBox]::Show($window, "Put the $($b.Count) held file(s) from the most recent move back where they came from?`n`nA file is never overwritten: if a file with the same name is already there, it stays in the holding folder.", 'Put files back', 'YesNo', 'Question', 'Yes')
+        $answer = [System.Windows.MessageBox]::Show($window, "Put the $($b.Count) held file(s) from the most recent move back into this folder?`n`n$($b.Source)`n`nIf that is not the folder you expect, press No.`n`nA file is never overwritten: if a file with the same name is already there, it stays in the holding folder.", 'Put files back', 'YesNo', 'Question', 'Yes')
         if ($answer -ne 'Yes') { return }
     }
-    $r = Restore-Batch -BatchDir $b.Dir -HoldingRoot $script:RestoreRoot
+    $r = Restore-Batch -BatchDir $b.Dir -HoldingRoot $script:RestoreRoot -ExpectedSource $b.Source
     if ($ui.PathBox.Text) { Show-Plan (Get-CleanPlan -Path $ui.PathBox.Text) }
     if ($r.Error) { Show-Banner $r.Error 'warn' }
     elseif ($r.Left.Count -eq 0) { Show-Banner "Put $($r.Restored) file(s) back into $($r.Source)." 'info' }
@@ -577,7 +613,7 @@ function Start-Clean {
     $plan = $script:Plan
     if (-not $plan -or -not $plan.Ok -or $plan.Files.Count -eq 0) { return }
     if (-not $SkipConfirm) {
-        $msg = "Move $($plan.Files.Count) file(s) ($(Format-Size $plan.Bytes)) from:`n`n$($plan.Path)`n`ninto the holding folder:`n$($plan.HoldingRoot)`n`nNothing is deleted and no disk space is freed. Subfolders are not touched. You can press Put back last move to return them."
+        $msg = "Move $($plan.Files.Count) file(s) ($(Format-Size $plan.Bytes)) from:`n`n$($plan.Path)`n`ninto the holding folder:`n$($plan.HoldingRoot)`n`nFolder Clear itself deletes nothing and frees no disk space. Subfolders are not touched. Use it only on ordinary local folders: cloud-synced folders are not supported. You can press Put back last move to return them."
         $answer = [System.Windows.MessageBox]::Show($window, $msg, 'Confirm', 'YesNo', 'Warning', 'No')
         if ($answer -ne 'Yes') { return }
     }
@@ -648,6 +684,7 @@ $window.Add_Drop({
 })
 
 if ($Screenshot) {
+    if (-not $ScreenshotDir) { $ScreenshotDir = Join-Path $PSScriptRoot 'docs\screenshots' }
     if (-not $DemoFolder) { throw 'Screenshot mode needs -DemoFolder (a folder of throwaway files).' }
     $window.ShowActivated = $false
     $window.Show()
