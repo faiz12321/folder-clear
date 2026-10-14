@@ -191,6 +191,39 @@ Assert-That ($res3.Moved -eq 0) 'a refused plan moves nothing'
 $src = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\FolderClear.ps1') -Raw
 Assert-That ($src -notmatch '(?i)Remove-Item|\.Delete\(|DeleteFile|InvokeVerb|SHFileOperation|IFileOperation|NameSpace\(10\)|rd /s|rmdir') 'the app source contains no delete or Recycle Bin call'
 
+# --- cloud-synced folders are refused; put-back is tied to the folder the user was shown ---
+foreach ($cp in @("$root\OneDrive\Docs", "$root\Dropbox\Work", "$root\Google Drive\Stuff", "$root\iCloudDrive\Pics", "$root\OneDrive - Contoso\Reports")) {
+    New-Item -ItemType Directory -Path $cp -Force | Out-Null; [IO.File]::WriteAllText("$cp\a.txt", 'x')
+    Assert-That (-not (Test-TargetFolder -Path $cp).Ok) ("a synced-style folder is refused: " + $cp.Substring($root.Length))
+}
+$savedOneDrive = $env:OneDrive
+$env:OneDrive = "$root\MyCloudHome"
+New-Item -ItemType Directory -Path "$root\MyCloudHome\Pictures\Trip" -Force | Out-Null
+Assert-That (-not (Test-TargetFolder -Path "$root\MyCloudHome\Pictures\Trip").Ok) 'a folder under the OneDrive path from the environment is refused'
+$env:OneDrive = $savedOneDrive
+$pf = "$root\PlainCheck\Old stuff"; New-Item -ItemType Directory -Path $pf -Force | Out-Null
+[IO.File]::WriteAllText("$pf\p1.txt", 'a'); [IO.File]::WriteAllText("$pf\p2.txt", 'b')
+Assert-That (Test-TargetFolder -Path $pf).Ok 'an ordinary folder is still accepted'
+$pfHold = "$root\holdPF"
+$pfRes = Invoke-Clean -Plan (Get-CleanPlan -Path $pf -HoldingRoot $pfHold)
+$pfBatch = @(Get-HeldBatches -HoldingRoot $pfHold)[0]
+Assert-That ($pfBatch.Source -eq $pf) 'a held batch reports the folder it will go back to'
+New-Item -ItemType Directory -Path "$root\OtherPF" -Force | Out-Null; [IO.File]::WriteAllText("$root\OtherPF\keep.txt", 'k')
+$mfPath = Join-Path $pfRes.BatchDir 'manifest.json'
+$mfObj = Get-Content -LiteralPath $mfPath -Raw | ConvertFrom-Json
+$mfObj.SourceFolder = "$root\OtherPF"
+[IO.File]::WriteAllText($mfPath, ($mfObj | ConvertTo-Json -Depth 5))
+$forged = Restore-Batch -BatchDir $pfRes.BatchDir -HoldingRoot $pfHold -ExpectedSource $pfBatch.Source
+Assert-That ($forged.Restored -eq 0 -and $forged.Error -ne '') 'an edited manifest pointing elsewhere is refused'
+Assert-That (@(Get-ChildItem -LiteralPath "$root\OtherPF" -File).Count -eq 1) 'nothing was put into the other folder'
+Assert-That (@(Get-ChildItem -LiteralPath $pfRes.BatchDir -File | Where-Object { $_.Name -like 'p*.txt' }).Count -eq 2) 'the files stay in the holding folder after a refused put-back'
+$pf2 = "$root\PlainCheck2\Old stuff"; New-Item -ItemType Directory -Path $pf2 -Force | Out-Null
+1..3 | ForEach-Object { [IO.File]::WriteAllText("$pf2\q$_.txt", "q$_") }
+$pf2Res = Invoke-Clean -Plan (Get-CleanPlan -Path $pf2 -HoldingRoot "$root\holdPF2")
+$pf2Batch = @(Get-HeldBatches -HoldingRoot "$root\holdPF2")[0]
+$pf2Back = Restore-Batch -BatchDir $pf2Res.BatchDir -HoldingRoot "$root\holdPF2" -ExpectedSource $pf2Batch.Source
+Assert-That ($pf2Back.Restored -eq 3 -and (Test-Path "$pf2\q1.txt")) 'an unedited batch is put back (3 files)'
+
 # --- cleanup of this test's own throwaway folders (junctions first) ------------
 cmd /c rmdir "$work\LinkedFolder" | Out-Null
 cmd /c rmdir "$root\JunctionToExternal" | Out-Null
